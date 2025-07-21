@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import realhf.api.core.system_api as system_api
 from realhf.base import logging, name_resolve, names
 from realhf.base.gpu_utils import set_cuda_device
+from realhf.base.time_monitor import WorkerTimeMonitor
 
 logger = logging.getLogger("worker")
 
@@ -516,14 +517,22 @@ class Worker:
         self.__worker_info = None
 
         self._start_time_ns = None
+        
+        # 时间监控器 - 将在configure后初始化
+        self.__time_monitor = None
 
         self.__set_status(WorkerServerStatus.READY)
 
     def __set_status(self, status: WorkerServerStatus):
+        old_status = getattr(self, f"_Worker__status", None)
         self.__status = status
         if self._server is not None:
             self.logger.debug(f"Setting worker server status to {status}")
             self._server.set_status(status)
+            
+        # 记录状态变更时间
+        if self.__time_monitor is not None and old_status is not None:
+            self.__time_monitor.record_status_change(old_status.value, status.value)
 
     @property
     def status(self) -> WorkerServerStatus:
@@ -613,6 +622,16 @@ class Worker:
                 ]
             )
 
+        # 初始化时间监控器
+        self.__time_monitor = WorkerTimeMonitor(
+            experiment_name=r.experiment_name,
+            trial_name=r.trial_name,
+            worker_name=f"{r.worker_type}/{r.worker_index}",
+            worker_type=r.worker_type,
+            worker_index=r.worker_index
+        )
+        self.__time_monitor.record_event("configure", "READY")
+
         self.__is_configured = True
 
     def reconfigure(self, **kwargs):
@@ -667,9 +686,18 @@ class Worker:
                     continue
                 if not self.__is_configured:
                     raise RuntimeError("Worker is not configured")
+                
+                # 记录poll开始
+                if self.__time_monitor is not None:
+                    self.__time_monitor.record_poll_start()
+                    
                 start_time = time.monotonic_ns()
                 r = self._poll()
                 poll_time = (time.monotonic_ns() - start_time) / 1e9
+                
+                # 记录poll结束
+                if self.__time_monitor is not None:
+                    self.__time_monitor.record_poll_end(r.sample_count, r.batch_count)
                 wait_seconds = 0.0
                 if self.__last_successful_poll_time is not None:
                     # Account the waiting time since the last successful step.
@@ -722,7 +750,19 @@ class AsyncWorker(Worker):
                     continue
                 if not self.is_configured:
                     raise RuntimeError("Worker is not configured")
+                
+                # 记录poll开始
+                if self._Worker__time_monitor is not None:
+                    self._Worker__time_monitor.record_poll_start()
+                    
                 r = await self._poll_async()
+                
+                # 记录poll结束
+                if self._Worker__time_monitor is not None:
+                    self._Worker__time_monitor.record_poll_end(
+                        getattr(r, 'sample_count', 0), 
+                        getattr(r, 'batch_count', 0)
+                    )
         except KeyboardInterrupt:
             self.exit()
         except Exception as e:
