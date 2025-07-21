@@ -5,6 +5,7 @@ import re
 import signal
 import sys
 import threading
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any, List
@@ -16,6 +17,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from realhf.api.cli_args import NameResolveConfig
 from realhf.api.core.system_api import Experiment, ExperimentScheduling, TasksGroup
 from realhf.base import constants, logging, name_resolve, names
+from realhf.base.time_monitor import WorkerTimeMonitor
 from realhf.system import WORKER_TYPES, load_worker
 from realhf.system.worker_base import AsyncWorker, Worker, WorkerServerStatus
 
@@ -82,6 +84,7 @@ class RayWorker:
         self.worker: Worker | AsyncWorker = worker_cls()
         self.worker_type = worker_type
         self.args = args
+        self.time_monitor = None
 
     def __repr__(self):
         return "".join([c.capitalize() for c in self.worker_type.split("_")])
@@ -99,22 +102,85 @@ class RayWorker:
         self.worker.args = self.args
         self.logger = logging.getLogger(f"{self.worker_type} {idx}", "benchmark")
         self.logger.info(f"Configuring {self.worker_type}...")
+        
+        # 初始化时间监控器
+        self.time_monitor = WorkerTimeMonitor(
+            experiment_name=worker_info.experiment_name,
+            trial_name=worker_info.trial_name,
+            worker_name=f"{self.worker_type}/{idx}",
+            worker_type=self.worker_type,
+            worker_index=idx
+        )
+        self.time_monitor.record_event("configure", "READY")
+        
+        # 将时间监控器设置到底层worker中，用于状态变更监控
+        if hasattr(self.worker, '_Worker__time_monitor'):
+            self.worker._Worker__time_monitor = self.time_monitor
+        
         self.worker._configure(cfg)
         self.logger.info(f"Configuring {self.worker_type}... Done.")
 
     def run_sync(self):
         self.logger.info(f"Running {self.worker_type} lazy initialization...")
+        
+        # 记录开始运行
+        if self.time_monitor:
+            self.time_monitor.record_event("start", "RUNNING")
+        
+        # 第一次poll（初始化）
+        if self.time_monitor:
+            self.time_monitor.record_poll_start()
+        start_time = time.time()
         self.worker._poll()
+        poll_duration = time.time() - start_time
+        if self.time_monitor:
+            self.time_monitor.record_poll_end(0, 0)  # 初始化poll没有具体的sample/batch count
+        
         self.logger.info(f"Running {self.worker_type} lazy initialization... Done.")
+        
+        # 主循环
         while self.worker.status != WorkerServerStatus.PAUSED:
-            self.worker._poll()
+            if self.time_monitor:
+                self.time_monitor.record_poll_start()
+            start_time = time.time()
+            result = self.worker._poll()
+            poll_duration = time.time() - start_time
+            if self.time_monitor:
+                # 尝试获取sample_count和batch_count
+                sample_count = getattr(result, 'sample_count', 0)
+                batch_count = getattr(result, 'batch_count', 0)
+                self.time_monitor.record_poll_end(sample_count, batch_count)
 
     async def run_async(self):
         self.logger.info(f"Running {self.worker_type} lazy initialization...")
+        
+        # 记录开始运行
+        if self.time_monitor:
+            self.time_monitor.record_event("start", "RUNNING")
+        
+        # 第一次poll（初始化）
+        if self.time_monitor:
+            self.time_monitor.record_poll_start()
+        start_time = time.time()
         await self.worker._poll_async()
+        poll_duration = time.time() - start_time
+        if self.time_monitor:
+            self.time_monitor.record_poll_end(0, 0)  # 初始化poll没有具体的sample/batch count
+        
         self.logger.info(f"Running {self.worker_type} lazy initialization... Done.")
+        
+        # 主循环
         while self.worker.status != WorkerServerStatus.PAUSED:
-            await self.worker._poll_async()
+            if self.time_monitor:
+                self.time_monitor.record_poll_start()
+            start_time = time.time()
+            result = await self.worker._poll_async()
+            poll_duration = time.time() - start_time
+            if self.time_monitor:
+                # 尝试获取sample_count和batch_count
+                sample_count = getattr(result, 'sample_count', 0)
+                batch_count = getattr(result, 'batch_count', 0)
+                self.time_monitor.record_poll_end(sample_count, batch_count)
 
 
 def _run_experiment(exp_cfg, expr_name, trial_name):

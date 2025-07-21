@@ -686,18 +686,9 @@ class Worker:
                     continue
                 if not self.__is_configured:
                     raise RuntimeError("Worker is not configured")
-                
-                # 记录poll开始
-                if self.__time_monitor is not None:
-                    self.__time_monitor.record_poll_start()
-                    
                 start_time = time.monotonic_ns()
                 r = self._poll()
                 poll_time = (time.monotonic_ns() - start_time) / 1e9
-                
-                # 记录poll结束
-                if self.__time_monitor is not None:
-                    self.__time_monitor.record_poll_end(r.sample_count, r.batch_count)
                 wait_seconds = 0.0
                 if self.__last_successful_poll_time is not None:
                     # Account the waiting time since the last successful step.
@@ -750,19 +741,7 @@ class AsyncWorker(Worker):
                     continue
                 if not self.is_configured:
                     raise RuntimeError("Worker is not configured")
-                
-                # 记录poll开始
-                if self._Worker__time_monitor is not None:
-                    self._Worker__time_monitor.record_poll_start()
-                    
                 r = await self._poll_async()
-                
-                # 记录poll结束
-                if self._Worker__time_monitor is not None:
-                    self._Worker__time_monitor.record_poll_end(
-                        getattr(r, 'sample_count', 0), 
-                        getattr(r, 'batch_count', 0)
-                    )
         except KeyboardInterrupt:
             self.exit()
         except Exception as e:
