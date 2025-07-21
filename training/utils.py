@@ -1,10 +1,12 @@
 # Copyright 2025 Ant Group Inc.
 import copy
+import json
 import os
 import re
 import signal
 import sys
 import threading
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any, List
@@ -18,6 +20,46 @@ from realhf.api.core.system_api import Experiment, ExperimentScheduling, TasksGr
 from realhf.base import constants, logging, name_resolve, names
 from realhf.system import WORKER_TYPES, load_worker
 from realhf.system.worker_base import AsyncWorker, Worker, WorkerServerStatus
+
+
+# 线程安全的时间记录函数
+def record_worker_event(worker_name: str, worker_type: str, event: str, filepath: str = "worker_timeline.json"):
+    """记录worker事件到JSON文件（线程安全版本）"""
+    try:
+        record = {
+            'worker_name': worker_name,
+            'worker_type': worker_type,
+            'event': event,
+            'timestamp': time.time(),
+            'human_time': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+        }
+        
+        # 每个worker使用单独的文件，避免冲突
+        worker_file = f"{filepath}.{worker_name.replace('/', '_')}"
+        with open(worker_file, 'a') as f:
+            f.write(json.dumps(record, ensure_ascii=False) + '\\n')
+    except Exception:
+        pass
+    #     # 读取worker自己的记录
+    #     existing_data = []
+    #     if os.path.exists(worker_file):
+    #         try:
+    #             with open(worker_file, 'r') as f:
+    #                 existing_data = json.load(f)
+    #         except:
+    #             existing_data = []
+        
+    #     # 添加新记录
+    #     existing_data.append(record)
+        
+    #     # 写入worker文件
+    #     with open(worker_file, 'w') as f:
+    #         json.dump(existing_data, f, indent=2)
+        
+            
+    # except Exception as e:
+    #     # 静默处理错误，不影响训练
+    #     pass
 
 
 # Copied from SGLang
@@ -82,6 +124,7 @@ class RayWorker:
         self.worker: Worker | AsyncWorker = worker_cls()
         self.worker_type = worker_type
         self.args = args
+        self.worker_name = "unknown"  # 将在configure中设置
 
     def __repr__(self):
         return "".join([c.capitalize() for c in self.worker_type.split("_")])
@@ -90,6 +133,11 @@ class RayWorker:
 
         worker_info = cfg.worker_info
         idx = worker_info.worker_index
+        self.worker_name = f"{self.worker_type}/{idx}"
+        
+        # 记录worker开始配置
+        record_worker_event(self.worker_name, self.worker_type, "configure_start")
+        
         constants.set_experiment_trial_names(
             worker_info.experiment_name, worker_info.trial_name
         )
@@ -101,20 +149,43 @@ class RayWorker:
         self.logger.info(f"Configuring {self.worker_type}...")
         self.worker._configure(cfg)
         self.logger.info(f"Configuring {self.worker_type}... Done.")
+        
+        # 记录worker配置完成
+        record_worker_event(self.worker_name, self.worker_type, "configure_done")
 
     def run_sync(self):
+        # 记录worker开始运行
+        record_worker_event(self.worker_name, self.worker_type, "run_start")
+        
         self.logger.info(f"Running {self.worker_type} lazy initialization...")
         self.worker._poll()
         self.logger.info(f"Running {self.worker_type} lazy initialization... Done.")
+        
+        # 记录worker初始化完成
+        record_worker_event(self.worker_name, self.worker_type, "init_done")
+        
         while self.worker.status != WorkerServerStatus.PAUSED:
             self.worker._poll()
+        
+        # 记录worker运行结束
+        record_worker_event(self.worker_name, self.worker_type, "run_end")
 
     async def run_async(self):
+        # 记录worker开始运行
+        record_worker_event(self.worker_name, self.worker_type, "run_start")
+        
         self.logger.info(f"Running {self.worker_type} lazy initialization...")
         await self.worker._poll_async()
         self.logger.info(f"Running {self.worker_type} lazy initialization... Done.")
+        
+        # 记录worker初始化完成
+        record_worker_event(self.worker_name, self.worker_type, "init_done")
+        
         while self.worker.status != WorkerServerStatus.PAUSED:
             await self.worker._poll_async()
+        
+        # 记录worker运行结束
+        record_worker_event(self.worker_name, self.worker_type, "run_end")
 
 
 def _run_experiment(exp_cfg, expr_name, trial_name):
