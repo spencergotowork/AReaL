@@ -799,18 +799,45 @@ class PPOActorInterface(model_api.ModelInterface):
                 )
 
             for reuse in range(self.sample_reuse):
-                # NOTE: We split PPO minibatches in terms of #seqs instead of #tokens.
-                flat_input = SequenceSample.shuffled(flat_input)
-                bs = flat_input.bs
-                sizes = [0 for _ in range(self.n_minibatches)]
-                for idx in range(bs):
-                    sizes[idx % self.n_minibatches] += 1
-                spec = SequenceSplitSpec(sizes=sizes)
+                # 修改：使用按长度分割而不是按序列数量分割
+                # 原来的代码：
+                # flat_input = SequenceSample.shuffled(flat_input)
+                # bs = flat_input.bs
+                # sizes = [0 for _ in range(self.n_minibatches)]
+                # for idx in range(bs):
+                #     sizes[idx % self.n_minibatches] += 1
+                # spec = SequenceSplitSpec(sizes=sizes)
+                # datas = flat_input.split_with_spec(spec)
+                
+                # 新的按长度分割策略
+                # 获取序列长度
+                sequence_lengths = [sum(lens) for lens in flat_input.seqlens[flat_input._get_split_key()]]
+                
+                # 计算每个mini-batch的最大token数量
+                total_tokens = sum(sequence_lengths)
+                max_tokens_per_mb = total_tokens // self.n_minibatches
+                
+                # 使用First-Fit Decreasing算法进行分割
+                from realhf.base import datapack
+                group_indices = datapack.ffd_allocate(
+                    sequence_lengths, 
+                    max_tokens_per_mb, 
+                    min_groups=self.n_minibatches
+                )
+                
+                # 重新排序序列
+                forward_indices = datapack.flat2d(group_indices)
+                flat_input = SequenceSample.reorder(flat_input, forward_indices)
+                
+                # 创建分割规格
+                spec = SequenceSplitSpec(sizes=[len(group) for group in group_indices])
                 datas = flat_input.split_with_spec(spec)
+                
                 logger.info(
                     f"PPO minibatch split (size {self.n_minibatches}): "
                     f"#seqs: {[s.bs for s in datas]}, "
-                    f"#tokens: {[sum([sum(lens) for lens in s.seqlens[s._get_split_key()]]) for s in datas]}"
+                    f"#tokens: {[sum([sum(lens) for lens in s.seqlens[s._get_split_key()]]) for s in datas]}, "
+                    f"token distribution: {[sum([sum(lens) for lens in s.seqlens[s._get_split_key()]]) for s in datas]}"
                 )
                 for mb_i, data in enumerate(datas):
                     train_stat = module.train_batch(
