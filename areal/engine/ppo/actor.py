@@ -9,8 +9,8 @@ from areal.api.engine_api import TrainEngine
 from areal.engine.fsdp_engine import FSDPEngine
 from areal.utils.data import split_padded_tensor_dict_into_mb_list
 from areal.utils.functional import (
-    gather_logprobs,
-    gather_logprobs_entropy,
+    gather_logprobs_memory_efficient as gather_logprobs,
+    gather_logprobs_entropy_memory_efficient as gather_logprobs_entropy,
     masked_normalization,
     ppo_actor_loss_fn,
 )
